@@ -63,6 +63,39 @@ Client: command card polls btw/status ──► host.call → Host registry → 
    with the tools actually registered, because `tools.restrict` rejects unknown
    names loudly), so it cannot race the main task's file writes or delegate.
 
+### Trajectory and durability (what is recorded, what is not)
+
+DSH's source of truth is the append-only session log — every event is lossless
+JSON and "a bad event fails at the append site" (`Session.append` only accepts
+declared `SessionEventMap` types). Here is how a `/btw` ask maps onto that:
+
+- **Recorded in the main session trajectory — the ask.** `command/run` (with
+  the question) and `command/done` are appended to the main session's log.
+  They are *log-only*, so the model surface is untouched, but they are fully
+  durable: the command card and the trajectory view replay them. The ask is
+  therefore visible in the main conversation's history, forever.
+- **Recorded in the child session trajectory — the Q&A.** Every ask is a real
+  session-backed fork subagent, so the preamble + question + the child's full
+  answer (including any read/search tool calls) live in the *child session's*
+  own log, discoverable via the subagent catalog under the main session.
+- **Not recorded anywhere durable in the main view — the rendered answer.**
+  The answer text shown in the card comes from the plugin's **in-memory
+  registry**, which is volatile: after a process restart with the plugin
+  unloaded, a replayed card shows the question and the "Asked —" acknowledgment
+  but not the answer (the answer itself remains in the child session).
+
+**The deliberate non-resonance.** The volatile answer registry is the one piece
+that is *not fully resonant* with DSH's philosophy: the main trajectory records
+the question but not its answer, and a replay alone cannot reconstruct the
+answer — you must open the child session. That is an accepted trade-off: writing
+the answer into the main log would require a new declared event type in the
+deployment's `SessionEventMap` (a dynamic plugin cannot add one), and keeping
+the answer out of the main log preserves the byte-identical model surface that
+the cache guarantee depends on. If a fully self-contained main trajectory ever
+becomes a requirement, the answer could be folded into the main log by a
+deployment-level event type (e.g. a log-only `btw/answer`) — out of scope for
+this dynamic plugin.
+
 ### The in-flight context preamble
 
 The fork seed ends at the last `turn/end` — the current in-flight turn (the
