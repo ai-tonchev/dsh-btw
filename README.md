@@ -8,15 +8,18 @@ or polluting the main agent's conversation.
   (waiting on a background job, mid-turn, or running a subagent). The composer
   stays editable during runs, and slash-command lines are adjudicated *before*
   the message/queue path, so the command executes instantly.
-- The answer streams into a **floating BTW panel** (bottom-right pill that
-  appears while the session is busy) and into a **durable command card** in the
-  chat flow. The main agent never sees the question or the answer.
-- A "BTW" button is also added to the composer tool row (`conversation.input.left`).
+- While the session agent is busy (the send button becomes **Stop**), a small
+  grey **BTW** button appears in the composer tool row (`conversation.input.left`).
+  Clicking it prefills the composer with `/btw `; type the question and hit
+  Enter. The button hides again once the agent is idle.
+- The answer renders inline in a **durable command card** in the chat flow
+  (`conversation.chat.commandview` keyed `btw`), with a cancel action while the
+  side ask is running. The main agent never sees the question or the answer.
 
 ## How it works
 
 ```
-User types /btw <question>            (or uses the floating panel)
+Composer: BTW button (busy only) → "/btw " draft, or type /btw <question>
         │
         ▼
 Host: commands.execute('/btw …')      ← command/run + command/done are
@@ -29,8 +32,7 @@ Host: subagents.start('fork', {        ← separate child agent + session
       })
         │
         ▼
-Client: command card polls btw/status ─┐
-        floating panel polls btw/list ─┴─► host.call → Host registry → answer
+Client: command card polls btw/status ──► host.call → Host registry → answer
 ```
 
 ### Why this satisfies "cache hits" and "no impact on DSH's sequential approach"
@@ -103,7 +105,7 @@ To stop: `cordis_stop` (cancels in-flight children via `run.dispose()`).
 
 - **Bare `/btw`** returns an error result so the composer keeps your draft.
 - **Concurrent asks** each get their own child agent and registry entry
-  (`btw-<commandId>`); the panel lists the last 20 per session.
+  (`btw-<commandId>`); each renders its own command card.
 - **Cancel** (`btw/cancel` or stopping the plugin) calls `SubagentRun.dispose()`.
 - **Host sandbox:** no `AbortController`/`AbortSignal` globals exist there.
   The plugin uses a never-aborting stub wherever a signal is required
@@ -122,5 +124,5 @@ To stop: `cordis_stop` (cancels in-flight children via `run.dispose()`).
 
 - Continuable side session so repeated asks hit an ever-growing child prefix
   (stronger side-thread cache hits) and the thread keeps its own Q&A history.
-- Live streaming + a "copy answer" action on the panel rows.
-- Optional auto-open of the panel when a background job starts.
+- Live streaming of the child's tokens into the command card.
+- Optional auto-prefill of `/btw ` in the composer when a background job starts.
