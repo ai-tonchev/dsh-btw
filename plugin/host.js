@@ -40,6 +40,7 @@ return {
     const NEVER_ABORT = Object.freeze({
       aborted: false,
       reason: undefined,
+      throwIfAborted() {},
       addEventListener() {},
       removeEventListener() {},
     });
