@@ -12,9 +12,11 @@ or polluting the main agent's conversation.
   grey **BTW** button appears in the composer tool row (`conversation.input.left`).
   Clicking it prefills the composer with `/btw `; type the question and hit
   Enter. The button hides again once the agent is idle.
-- The answer renders inline in a **durable command card** in the chat flow
+- The answer renders inline in a **command card** in the chat flow
   (`conversation.chat.commandview` keyed `btw`), with a cancel action while the
-  side ask is running. The main agent never sees the question or the answer.
+  side ask is running. The card is *live-only*: on replay from an earlier
+  process it renders nothing (the answer text is not part of the durable log).
+  The main agent never sees the question or the answer.
 
 ## How it works
 
@@ -72,8 +74,9 @@ declared `SessionEventMap` types). Here is how a `/btw` ask maps onto that:
 - **Recorded in the main session trajectory — the ask.** `command/run` (with
   the question) and `command/done` are appended to the main session's log.
   They are *log-only*, so the model surface is untouched, but they are fully
-  durable: the command card and the trajectory view replay them. The ask is
-  therefore visible in the main conversation's history, forever.
+  durable: the trajectory view replays them and the live chat card renders the
+  ask while the plugin is running. The ask is therefore visible in the main
+  conversation's history, forever.
 - **Recorded in the child session trajectory — the Q&A.** Every ask is a real
   session-backed fork subagent, so the preamble + question + the child's full
   answer (including any read/search tool calls) live in the *child session's*
@@ -81,8 +84,12 @@ declared `SessionEventMap` types). Here is how a `/btw` ask maps onto that:
 - **Not recorded anywhere durable in the main view — the rendered answer.**
   The answer text shown in the card comes from the plugin's **in-memory
   registry**, which is volatile: after a process restart with the plugin
-  unloaded, a replayed card shows the question and the "Asked —" acknowledgment
-  but not the answer (the answer itself remains in the child session).
+  unloaded, the answer is gone from the main view (the answer itself remains in
+  the child session). Because a replay cannot reconstruct the answer, **the card
+  is live-only**: when the registry no longer has the entry, the card renders
+  nothing rather than a dead card with a fake outcome. Caveat: this suppression
+  applies while the plugin is running; if the plugin is stopped or removed, the
+  default command card (question + "Asked.") reappears for old btw asks.
 
 **The deliberate non-resonance.** The volatile answer registry is the one piece
 that is *not fully resonant* with DSH's philosophy: the main trajectory records
@@ -91,8 +98,10 @@ answer — you must open the child session. That is an accepted trade-off: writi
 the answer into the main log would require a new declared event type in the
 deployment's `SessionEventMap` (a dynamic plugin cannot add one), and keeping
 the answer out of the main log preserves the byte-identical model surface that
-the cache guarantee depends on. If a fully self-contained main trajectory ever
-becomes a requirement, the answer could be folded into the main log by a
+the cache guarantee depends on. The `command/run`/`command/done` records remain
+in the raw log (the trajectory view still shows them as log records); only the
+chat card is suppressed on replay. If a fully self-contained main trajectory
+ever becomes a requirement, the answer could be folded into the main log by a
 deployment-level event type (e.g. a log-only `btw/answer`) — out of scope for
 this dynamic plugin.
 

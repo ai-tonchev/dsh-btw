@@ -13,7 +13,9 @@
  *    "/btw " so the user types the question and hits Enter.
  *  - `conversation.chat.commandview` keyed `btw` — the rich command card for
  *    /btw invocations (question + live status + answer + cancel), polling the
- *    Host registry via package-private `host.call('btw/status', …)`.
+ *    Host registry via package-private `host.call('btw/status', …)`. The card
+ *    is live-only: on replay (registry miss from an earlier process) it renders
+ *    nothing, because the answer text is not part of the durable log.
  *
  * All state crossing the RPC boundary is plain scalars (question/status/
  * answer/error), never live DSH objects.
@@ -37,27 +39,50 @@ return {
     );
 
     // Command card: question + live status + answer, polling the Host registry.
-    // Falls back to the command/done text when the registry entry is gone
-    // (plugin restarted). Offers cancel while the side ask is running.
+    // The card is LIVE-ONLY: once the registry no longer has the entry (the ask
+    // is replayed from an earlier process, so the answer is gone), the card
+    // renders nothing instead of a dead card with a fake outcome. Polling stops
+    // once the outcome is known (registry miss or terminal status).
     function BtwCard(props) {
       const node = props.node;
       const [state, setState] = React.useState(null);
+      const [checked, setChecked] = React.useState(false);
       React.useEffect(() => {
         let disposed = false;
+        let interval = null;
+        const stop = () => { if (interval) { interval(); interval = null; } };
         const poll = () => {
           host.call('btw/status', { commandId: node.commandId }).then((value) => {
-            if (!disposed) setState(value === null || value === undefined ? null : value);
+            if (disposed) return;
+            setChecked(true);
+            if (value === null || value === undefined) {
+              setState(null);
+              stop();
+            } else {
+              setState(value);
+              if (value.status !== 'running') stop();
+            }
           }, () => {});
         };
+        interval = ctx.interval(poll, 700);
         poll();
-        const dispose = ctx.interval(poll, 700);
-        return () => { disposed = true; dispose(); };
+        return () => { disposed = true; if (interval) interval(); };
       }, [node.commandId]);
-      const question = (state && state.question) || String(node.args || '').replace(/^\s+/, '');
+
+      // First poll still in flight: the ask was just submitted; show a brief
+      // placeholder until the registry answers.
+      if (!checked) {
+        return React.createElement('div', { className: 'btw-card' },
+          React.createElement('div', { className: 'btw-card-q' }, 'BTW \u00b7 ' + String(node.args || '').replace(/^\s+/, '')),
+          React.createElement('div', { className: 'btw-card-run' }, 'checking\u2026'),
+        );
+      }
+      // Registry miss on replay: the answer is gone, so the card renders nothing.
+      if (state === null) return null;
+
+      const question = state.question || String(node.args || '').replace(/^\s+/, '');
       const cells = [React.createElement('div', { className: 'btw-card-q', key: 'q' }, 'BTW \u00b7 ' + question)];
-      if (state === null) {
-        if (node.outcome && node.outcome.text) cells.push(React.createElement('div', { className: 'btw-card-a', key: 'o' }, node.outcome.text));
-      } else if (state.status === 'running') {
+      if (state.status === 'running') {
         cells.push(React.createElement('div', { className: 'btw-card-run', key: 'r' }, 'answering\u2026'));
         cells.push(React.createElement('button', {
           className: 'btw-card-cancel',

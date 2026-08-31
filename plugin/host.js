@@ -169,7 +169,7 @@ return {
         if (!question) return { kind: 'error', text: 'Ask a question, e.g. /btw what does this error mean?' };
         if (!subagents.list().includes('fork')) return { kind: 'error', text: 'btw: the fork subagent provider is not available in this deployment.' };
         spawnAsk(invocation.agent, invocation.commandId, question);
-        return { kind: 'success', text: 'Asked \u2014 the answer arrives in the BTW panel.' };
+        return { kind: 'success', text: 'Asked.' };
       },
     }));
 
