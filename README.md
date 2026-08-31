@@ -13,10 +13,13 @@ or polluting the main agent's conversation.
   Clicking it prefills the composer with `/btw `; type the question and hit
   Enter. The button hides again once the agent is idle.
 - The answer renders inline in a **command card** in the chat flow
-  (`conversation.chat.commandview` keyed `btw`), with a cancel action while the
-  side ask is running. The card is *live-only*: on replay from an earlier
-  process it renders nothing (the answer text is not part of the durable log).
-  The main agent never sees the question or the answer.
+  (`conversation.chat.commandview` keyed `btw`) — a resumable side thread: it
+  shows the question/answer transcript, the **token stats** (input / cache hit /
+  output as reported by the model adapter), a cancel action while answering, and
+  a **follow-up input** that continues the same child session. The card is
+  *live-only*: on replay from an earlier process it renders nothing (the
+  transcript is not part of the durable main log). The main agent never sees the
+  question or the answer.
 
 ## How it works
 
@@ -27,14 +30,18 @@ Composer: BTW button (busy only) → "/btw " draft, or type /btw <question>
 Host: commands.execute('/btw …')      ← command/run + command/done are
         │                                log-only, NEVER model surface
         ▼
-Host: subagents.start('fork', {        ← separate child agent + session
-        parent: mainAgent,               seeded with the parent's
-        prompt: [preamble + question],   completed-turn prefix
+Host: subagents.startContinuable(      ← durable continuable child, seeded
+        provider: 'fork',                with the parent's completed-turn
+        prompt: [preamble + question],   prefix; toolFilter = read-only set
         toolFilter: { allow: [read, glob, grep, web_search, read_image, skill] }
-      })
+      )
         │
         ▼
-Client: command card polls btw/status ──► host.call → Host registry → answer
+Host: poll loop reads the child's own log (events past the seed boundary)
+        │   → transcript exchanges + token usage
+        ▼
+Client: command card polls btw/status ──► answer + stats
+        follow-up input ──► btw/followup ──► subagents.followup (same child)
 ```
 
 ### Why this satisfies "cache hits" and "no impact on DSH's sequential approach"
@@ -50,13 +57,16 @@ Client: command card polls btw/status ──► host.call → Host registry → 
    child with the parent's completed-turn prefix: the exact message events the
    parent already sent. The provider's prefix cache therefore covers that
    history and the child only "pays" for its own system prompt, the small
-   context preamble, and the question. Honest caveat: the child's system prompt
-   differs from the parent's (subagent instructions + reduced tool list), so
-   whether the parent's exact cache entry is *reused* rather than just
-   *covered* depends on the provider's cache keying (Anthropic per-block
-   breakpoints vs. DeepSeek/OpenAI whole-prefix). A future "continuable side
-   session" mode (`subagents.startContinuable` + `followup`) would make
-   successive asks hit the child's own growing prefix — incremental cost only.
+   context preamble, and the question. Because the child is **continuable**
+   (`subagents.startContinuable` + `followup`), every follow-up asked from the
+   card continues the SAME child session, so successive exchanges hit the
+   child's own growing prefix — incremental cost only, and the card's stats
+   line shows the actual cache-hit/input/output tokens reported by the adapter
+   (`assistant/message` usage folded from the child's log). Honest caveat: the
+   child's system prompt differs from the parent's (subagent instructions +
+   reduced tool list), so whether the parent's exact cache entry is *reused*
+   rather than just *covered* depends on the provider's cache keying (Anthropic
+   per-block breakpoints vs. DeepSeek/OpenAI whole-prefix).
 3. **Sequential model — untouched.** DSH serializes per session, not globally.
    The side child is a separate agent+session, exactly like the background
    `subagent` tool. The main agent's inbox, turn ordering, and tool executions
@@ -77,10 +87,11 @@ declared `SessionEventMap` types). Here is how a `/btw` ask maps onto that:
   durable: the trajectory view replays them and the live chat card renders the
   ask while the plugin is running. The ask is therefore visible in the main
   conversation's history, forever.
-- **Recorded in the child session trajectory — the Q&A.** Every ask is a real
-  session-backed fork subagent, so the preamble + question + the child's full
-  answer (including any read/search tool calls) live in the *child session's*
-  own log, discoverable via the subagent catalog under the main session.
+- **Recorded in the child session trajectory — the full thread.** Every ask
+  creates a durable **continuable** fork subagent, so the preamble + every
+  exchange (question, answer, and any read/search tool calls) live in the
+  *child session's* own log, discoverable via the subagent catalog under the
+  main session and resumable with follow-ups from the card.
 - **Not recorded anywhere durable in the main view — the rendered answer.**
   The answer text shown in the card comes from the plugin's **in-memory
   registry**, which is volatile: after a process restart with the plugin
@@ -134,37 +145,46 @@ Dynamic plugins are defined and run through the harness's own tools, not by
 3. To update: `cordis_define` with `kind: 'existing'` + the same `pluginId`,
    then `cordis_run mode: 'update'` with the new `packageId`.
 
-To stop: `cordis_stop` (cancels in-flight children via `run.dispose()`).
+To stop: `cordis_stop` (interrupts in-flight side threads via `subagents.interrupt`).
 
 ## Runtime prerequisites
 
 - `dsh-commands` (the `/` slash-source + command registry) — shipped.
 - `dsh-subagent-fork-in-process` (provider name `fork`) — shipped; without it
   the command returns an error result and never silently degrades.
+- The subagent continuation manager (backs `startContinuable`/`followup`; the
+  `subagent_fork` tool depends on it) — shipped.
 - `dsh-agent-loop`, `dsh-client-ui-commands` (command card fallback) — shipped.
 
 ## Behavior notes & limitations
 
 - **Bare `/btw`** returns an error result so the composer keeps your draft.
-- **Concurrent asks** each get their own child agent and registry entry
+- **Concurrent asks** each get their own continuable child and registry entry
   (`btw-<commandId>`); each renders its own command card.
-- **Cancel** (`btw/cancel` or stopping the plugin) calls `SubagentRun.dispose()`.
+- **Resume** — the card's follow-up input continues the same child session
+  (`subagents.followup`); follow-ups are queued FIFO while the child is busy.
+- **Cancel** (`btw/cancel` or stopping the plugin) interrupts the child via
+  `subagents.interrupt` under the parent agent's authority.
+- **Stats** — the card's `in X · cache hit Y · out Z` line sums
+  `assistant/message` usage from the child's log (`inputTokens`,
+  `cacheReadTokens`, `outputTokens`; `write` shown when `cacheWriteTokens` is
+  reported). Billed input = in + cache hit + write. The line is omitted when the
+  adapter reported no usage.
 - **Host sandbox:** no `AbortController`/`AbortSignal` globals exist there.
   The plugin uses a never-aborting stub wherever a signal is required
-  (`commands.execute`, `subagents.start`) and cancels explicitly via
-  `run.dispose()`.
-- **Streaming:** v1 shows status + the final answer (polled). Live token
-  streaming from the child is a documented follow-up (scoped `session/event`
-  listener on `run.localAgent.ctx`).
-- **Session accumulation:** each ask creates a one-shot child session (same as
-  the built-in subagent tool). Cleanup/archival is future work.
+  (`commands.execute`, `subagents.startContinuable`, `subagents.followup`) and
+  cancels explicitly via `subagents.interrupt`.
+- **Streaming:** the card shows status + the accumulated answer (polled every
+  ~0.7–0.9 s). Live token streaming from the child is a documented follow-up
+  (scoped `session/event` listener on the child's ctx).
+- **Session accumulation:** each ask creates a continuable child session
+  (durable, resumable). Cleanup/archival of old threads is future work.
 - **Cache verification** is provider-level; this plugin structurally guarantees
   main-session cache preservation and prefix sharing, and states the
   provider-dependent part honestly in this README.
 
 ## Follow-ups
 
-- Continuable side session so repeated asks hit an ever-growing child prefix
-  (stronger side-thread cache hits) and the thread keeps its own Q&A history.
 - Live streaming of the child's tokens into the command card.
+- "Copy answer" action on the card.
 - Optional auto-prefill of `/btw ` in the composer when a background job starts.
