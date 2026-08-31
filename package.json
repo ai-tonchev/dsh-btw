@@ -1,0 +1,67 @@
+{
+  "name": "dsh-btw",
+  "version": "0.1.0",
+  "description": "Recreates Claude CLI's /btw for DeepSeek Harness: ask a question by the way while the main agent keeps running. Resumable side threads rendered in the chat card, live token stats (input / cache hit / output), and cache-preserving fork children with a read-only toolset.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ai-tonchev/dsh-btw.git"
+  },
+  "homepage": "https://github.com/ai-tonchev/dsh-btw#readme",
+  "bugs": {
+    "url": "https://github.com/ai-tonchev/dsh-btw/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "btw",
+    "side-thread",
+    "subagent",
+    "cache",
+    "token-stats"
+  ],
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "LICENSE",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build-host.mjs && node scripts/build-client.mjs && node scripts/verify-client-bundle.mjs",
+    "build:host": "node scripts/build-host.mjs",
+    "build:client": "node scripts/build-client.mjs",
+    "verify": "node scripts/verify-client-bundle.mjs && node scripts/smoke-host.mjs",
+    "smoke": "node scripts/smoke-host.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-commands": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-subagent": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-typert-protocol": "^0.1.1-rc.2"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
