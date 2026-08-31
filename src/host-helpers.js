@@ -86,6 +86,44 @@ export function foldUsage(entry, usage) {
 }
 
 /**
+ * Walk the child session's live event log (events past the seed boundary) and
+ * fold it into the side-thread entry: assistant answers + usage into the
+ * transcript, and turn completion into the status. Session events carry their
+ * payload under `data` (`{type, seq, time, data}`), so the assistant message,
+ * usage, and turn reason are read from `event.data`. Live sequence numbers
+ * equal array indexes; a mismatch (or a missing object) stops the walk.
+ *
+ * @returns the new `lastSeenSeq` for the entry.
+ */
+export function foldChildEvents(entry, events) {
+  if (!Array.isArray(events)) return entry.lastSeenSeq;
+  for (let i = entry.lastSeenSeq + 1; i < events.length; i++) {
+    const event = events[i];
+    if (!event || typeof event !== 'object') continue;
+    if (event.seq !== i) break; // seq must equal index in the live log
+    if (event.seq <= entry.seedEndSeq) continue; // seeded parent history
+    const data = event.data && typeof event.data === 'object' ? event.data : {};
+    if (event.type === 'assistant/message' && data.message && Array.isArray(data.message.content)) {
+      const text = textOf(data.message.content);
+      if (text) entry.exchanges.push({ role: 'assistant', text });
+      foldUsage(entry, data.usage);
+      if (entry.pending > 0) entry.pending -= 1;
+    } else if (event.type === 'turn/end' && entry.pending <= 0) {
+      const kind = data.reason && data.reason.kind;
+      if (entry.status === 'running') {
+        if (kind === 'completed') entry.status = 'done';
+        else if (kind === 'aborted') entry.status = 'cancelled';
+        else {
+          entry.status = 'error';
+          entry.error = entry.error || ('side agent turn ended: ' + kind);
+        }
+      }
+    }
+  }
+  return events.length - 1;
+}
+
+/**
  * The child toolset: intersect the safe read-only set with the tools actually
  * registered (tools.restrict rejects unknown names loudly in the child's
  * creation window). A profile-level context exposes no agent tool scope, so
@@ -104,7 +142,9 @@ export function computeToolFilter(tools) {
   } catch (err) { /* best-effort */ }
   const intersected = known !== null ? SAFE_TOOLS.filter((name) => known.has(name)) : null;
   if (intersected === null || intersected.length === 0) {
-    console.warn('dsh-btw: no safe read-only tools resolvable from this context; using the full read-only set');
+    // Expected for profile-level hosts (no agent tool scope): use the full
+    // read-only set. A genuinely unknown name still fails loudly inside
+    // tools.restrict at child creation, surfacing as a clear start error.
     return { allow: SAFE_TOOLS.slice() };
   }
   return { allow: intersected };

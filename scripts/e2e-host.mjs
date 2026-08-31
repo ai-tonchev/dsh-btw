@@ -41,11 +41,13 @@ await ctx.plugin(TypertRegistry);
 await ctx.plugin(CommandRuntime);
 
 const calls = { starts: [], followups: [], interrupts: [] };
+let spawnCount = 0;
 ctx.provide('subagents', {
   list: () => ['fork'],
   startContinuable: async (spec) => {
     calls.starts.push(spec);
-    return { childId: 'child-stub-1', messageId: 'msg-stub-1' };
+    spawnCount += 1;
+    return { childId: 'child-stub-' + spawnCount, messageId: 'msg-stub-' + spawnCount };
   },
   followup: async (parent, childId, content, options) => {
     calls.followups.push({ parent, childId, content, options });
@@ -55,7 +57,24 @@ ctx.provide('subagents', {
     calls.interrupts.push({ targetSessionId, authority });
   },
 });
-ctx.provide('agents', { get: () => undefined, list: () => [], roots: () => [] });
+// Fake child agent whose live log carries the fork seed + the child's own
+// Q&A in the real session event shape ({type, seq, time, data}).
+const fakeChild = {
+  session: {
+    events: [
+      { type: 'turn/end', seq: 0, data: { turn: 0, reason: { kind: 'completed' } } },
+      { type: 'user/message', seq: 1, data: { content: [{ type: 'text', text: 'seed user msg' }] } },
+      { type: 'user/message', seq: 2, data: { content: [{ type: 'text', text: 'the btw question' }] } },
+      { type: 'assistant/message', seq: 3, data: { message: { content: [{ type: 'text', text: 'the side answer' }] }, usage: { inputTokens: 10, outputTokens: 20, cacheReadTokens: 30, cacheWriteTokens: 0 } } },
+      { type: 'turn/end', seq: 4, data: { turn: 1, reason: { kind: 'completed' } } },
+    ],
+  },
+};
+ctx.provide('agents', {
+  get: (id) => (id === 'child-stub-1' ? fakeChild : undefined),
+  list: () => [],
+  roots: () => [],
+});
 
 const btwFiber = ctx.plugin({ name: btwName, inject: btwInject, apply: btwApply });
 
@@ -102,10 +121,25 @@ try {
   const cancel = await panel.cancel('unknown-command', new AbortController().signal);
   assert(cancel && cancel.ok === false, 'btwPanel.cancel unknown -> error');
 
-  // 5. teardown interrupts the in-flight side thread
+  // 4b. poll loop folds the child's real-shaped log and completes the entry
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  await sleep(1300); // poll interval is 900ms
+  const settled = await panel.status(execution.commandId);
+  assert(settled !== null, 'status resolves after the poll fold');
+  assert(settled.status === 'done', `poll folds the child log to done (got ${settled.status})`);
+  assert(settled.exchanges.some((e) => e.role === 'assistant' && e.text === 'the side answer'), 'transcript contains the child answer');
+  assert(settled.usage.cacheRead === 30, 'usage folded from the child log');
+
+  // 4c. a second ask whose child is not resident stays running
+  const execution2 = await ctx.commands.execute(agent, '/btw second ask', [], new AbortController().signal);
+  await sleep(1300);
+  const running = await panel.status(execution2.commandId);
+  assert(running !== null && running.status === 'running', 'unresolved child keeps the entry running');
+
+  // 5. teardown interrupts the still-running side thread
   await btwFiber.dispose();
   assert(calls.interrupts.length === 1, 'plugin teardown interrupts the in-flight child');
-  assert(calls.interrupts[0].targetSessionId === 'child-stub-1', 'interrupt targets the child session');
+  assert(calls.interrupts[0].targetSessionId === 'child-stub-2', 'interrupt targets the running child session');
   assert(calls.interrupts[0].authority && calls.interrupts[0].authority.kind === 'ancestor', 'interrupt uses ancestor authority');
 
   if (failed === 0) {

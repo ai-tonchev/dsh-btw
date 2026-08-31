@@ -20,7 +20,7 @@
  * build:host`); the profile installs the committed `lib/` as-is.
  */
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
-import { textOf, excerpt, seedEndSeqOf, buildPreamble, computeToolFilter, foldUsage } from './host-helpers.js';
+import { textOf, excerpt, seedEndSeqOf, buildPreamble, computeToolFilter, foldChildEvents } from './host-helpers.js';
 
 export const name = 'dsh-btw';
 export const inject = ['commands', 'subagents', 'agents', 'timer'];
@@ -92,29 +92,7 @@ export function apply(ctx) {
     if (!agent) return; // not resident (cold resume in progress) — retry next tick
     const events = agent.session && Array.isArray(agent.session.events) ? agent.session.events : null;
     if (!events) return;
-    for (let i = entry.lastSeenSeq + 1; i < events.length; i++) {
-      const event = events[i];
-      if (!event || typeof event !== 'object') continue;
-      if (event.seq !== i) break; // seq must equal index in the live log
-      if (event.seq <= entry.seedEndSeq) continue; // seeded parent history
-      if (event.type === 'assistant/message' && event.message && Array.isArray(event.message.content)) {
-        const text = textOf(event.message.content);
-        if (text) entry.exchanges.push({ role: 'assistant', text });
-        foldUsage(entry, event.usage);
-        if (entry.pending > 0) entry.pending -= 1;
-      } else if (event.type === 'turn/end' && entry.pending <= 0) {
-        const kind = event.reason && event.reason.kind;
-        if (entry.status === 'running') {
-          if (kind === 'completed') entry.status = 'done';
-          else if (kind === 'aborted') entry.status = 'cancelled';
-          else {
-            entry.status = 'error';
-            entry.error = entry.error || ('side agent turn ended: ' + kind);
-          }
-        }
-      }
-    }
-    entry.lastSeenSeq = events.length - 1;
+    entry.lastSeenSeq = foldChildEvents(entry, events);
     maybeStopPoll(entry);
   }
 
