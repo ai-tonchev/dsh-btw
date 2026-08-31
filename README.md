@@ -188,20 +188,30 @@ for versioned changes.
 ```
 src/index.js     Host half (plain ESM)  → lib/index.js   (committed copy)
 src/client.js    Client half (browser)  → lib/client.js  (esbuild + ModuleLoader handshake)
-scripts/         build-host, build-client, verify, smoke-host
+scripts/         build-host, build-client, verify, smoke-host, e2e-host, link-harness
 cordis.patch.yml Profile layer patch    (dsh.bundle.patch target)
 ```
 
 ```bash
 pnpm install          # or: npm install (esbuild devDependency only)
 npm run build         # copies host + bundles client + verifies
-npm run verify        # checks the committed lib/ contract
-npm run smoke         # imports lib/index.js against a fixture and checks the plugin shape
+npm run verify        # checks the committed lib/ contract (bundle + smoke)
+npm run e2e           # boots a real Cordis ctx with the REAL timer/sessions/commands/
+                      #   typert services, mounts lib/index.js, drives commands.execute
+                      #   and the btwPanel remote, and asserts the full host contract
+                      #   (the subagent continuation stack is stubbed)
 ```
+
+`npm run e2e` needs the real DSH packages resolvable; link them from a local
+harness checkout with `npm run link:harness -- <checkout>/node_modules`
+(or `DSH_HARNESS_NODE_MODULES`).
 
 `lib/` is committed (the profile install path builds nothing on the user's
 machine). To test against a live harness, install the checkout into a scratch
-profile: `dsh plugin --profile <scratch> add /absolute/path/to/dsh-btw`.
+profile: `dsh plugin --profile <scratch> add /absolute/path/to/dsh-btw`. A
+`link:` install keeps the profile pointing at this checkout, so local changes
+apply on the next DSH restart; switch to the canonical
+`dsh plugin --profile web add github:ai-tonchev/dsh-btw` once published.
 
 ## License
 
