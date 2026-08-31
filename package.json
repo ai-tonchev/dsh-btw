@@ -51,7 +51,8 @@
     "verify": "node scripts/verify-client-bundle.mjs && node scripts/smoke-host.mjs",
     "smoke": "node scripts/smoke-host.mjs",
     "link:harness": "node scripts/link-harness.mjs",
-    "e2e": "node scripts/e2e-host.mjs"
+    "e2e": "node scripts/e2e-host.mjs",
+    "test": "node --test tests/*.test.mjs"
   },
   "devDependencies": {
     "esbuild": "^0.28.2",

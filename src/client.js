@@ -25,99 +25,11 @@
  * profile installs.
  */
 import * as React from 'react';
-import { z } from 'zod';
 import pkg from '../package.json' with { type: 'json' };
+import { ZERO_USAGE, commandIdParam, textParam, statusSchema, okSchema, descriptor, BTW_REMOTE, unwrap, formatStats } from './client-helpers.js';
 
 export const name = pkg.name;
 export const inject = ['slots', 'remote', 'timer'];
-
-const ZERO_USAGE = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-
-const PANEL_CSS = `
-[data-dsh-btw].btw-tool{height:28px;padding:0 10px;border:none;border-radius:999px;background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.15));color:var(--dsw-alias-label-secondary,#a0a4ad);font-size:12px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:4px}
-[data-dsh-btw].btw-tool:hover{color:var(--dsw-alias-label-primary,#e8eaee)}
-[data-dsh-btw].btw-card{display:flex;flex-direction:column;gap:6px;padding:10px 14px;border-radius:10px;background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12));max-width:min(680px,82%)}
-[data-dsh-btw] .btw-card-head{font-size:12px;font-weight:600;color:var(--dsw-alias-label-caption,#7c818c)}
-[data-dsh-btw] .btw-card-you{font-size:13px;color:var(--dsw-alias-label-secondary,#a0a4ad);word-break:break-word}
-[data-dsh-btw] .btw-card-a{font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,#e8eaee);white-space:pre-wrap;word-break:break-word}
-[data-dsh-btw] .btw-card-run{font-size:12px;color:var(--dsw-alias-state-business-primary,#2b6de8)}
-[data-dsh-btw] .btw-card-err{font-size:12px;color:var(--dsw-alias-state-error-primary,#e5484d)}
-[data-dsh-btw] .btw-card-cx{font-size:12px;color:var(--dsw-alias-label-caption,#7c818c)}
-[data-dsh-btw] .btw-card-cancel{align-self:flex-start;border:none;background:none;color:var(--dsw-alias-label-caption,#7c818c);font-size:11px;cursor:pointer;padding:0;text-decoration:underline}
-[data-dsh-btw] .btw-card-stats{font-size:11px;color:var(--dsw-alias-label-caption,#7c818c)}
-[data-dsh-btw] .btw-card-inputrow{display:flex;gap:8px;align-items:center}
-[data-dsh-btw] .btw-card-input{flex:1;min-width:0;background:var(--dsw-specific-input-major,#1b1e24);color:var(--dsw-alias-label-primary,#e8eaee);border:1px solid var(--dsw-alias-border-l2,#383d48);border-radius:8px;padding:5px 10px;font-size:13px;outline:none}
-[data-dsh-btw] .btw-card-input:focus{border-color:var(--dsw-alias-state-business-primary,#2b6de8)}
-[data-dsh-btw] .btw-card-send{border:none;border-radius:8px;padding:5px 12px;font-size:12px;font-weight:600;cursor:pointer;background:var(--dsw-alias-button-info-fill,#2b6de8);color:#fff}
-[data-dsh-btw] .btw-card-send:disabled{opacity:.5;cursor:default}
-`;
-
-function installPanelStyles() {
-  const existing = document.querySelector('style[data-dsh-btw]');
-  if (existing !== null) return () => {};
-  const element = document.createElement('style');
-  element.dataset.dshBtw = '';
-  element.textContent = PANEL_CSS;
-  document.head.append(element);
-  return () => { element.remove(); };
-}
-
-// ---- btwPanel remote contribution (strict zod codecs; same wire contract as
-// the host's src-json PANEL_INVOCATIONS) ----
-
-const commandIdParam = Object.freeze({
-  name: 'commandId',
-  wire: 'commandId',
-  source: 'json',
-  codec: Object.freeze({ mode: 'strict', typeSymbol: 'dsh-btw/types#commandId', schema: z.string() }),
-  acceptsUndefined: true,
-});
-const textParam = Object.freeze({
-  name: 'text',
-  wire: 'text',
-  source: 'json',
-  codec: Object.freeze({ mode: 'strict', typeSymbol: 'dsh-btw/types#text', schema: z.string() }),
-  acceptsUndefined: true,
-});
-
-const statusSchema = z.object({
-  status: z.string(),
-  question: z.string(),
-  exchanges: z.array(z.object({ role: z.string(), text: z.string() })),
-  usage: z.object({ input: z.number(), output: z.number(), cacheRead: z.number(), cacheWrite: z.number() }),
-  error: z.string(),
-}).nullable();
-
-const okSchema = z.object({ ok: z.boolean(), error: z.string().optional() });
-
-function descriptor(method, parameters, schema, cancellation) {
-  return Object.freeze({
-    id: `dsh-btw#btwPanel/${method}`,
-    service: 'btwPanel',
-    namespace: 'btwPanel',
-    method,
-    invocation: Object.freeze({ kind: 'direct' }),
-    parameters: Object.freeze(parameters.map((p) => Object.freeze({ ...p, codec: Object.freeze(p.codec) }))),
-    ...(cancellation ? { cancellation: Object.freeze({ parameter: 'signal' }) } : {}),
-    result: Object.freeze({ mode: 'strict', typeSymbol: `dsh-btw/types#${method}Result`, schema }),
-  });
-}
-
-const BTW_REMOTE = Object.freeze({
-  package: 'dsh-btw',
-  descriptors: Object.freeze([
-    descriptor('status', [commandIdParam], statusSchema, false),
-    descriptor('followup', [commandIdParam, textParam], okSchema, true),
-    descriptor('cancel', [commandIdParam], okSchema, true),
-  ]),
-});
-
-function unwrap(env) {
-  if (!env || env.ok === false) {
-    throw new Error(env && env.error ? String(env.error) : 'btwPanel call failed');
-  }
-  return env.value;
-}
 
 export function apply(ctx) {
   const slots = ctx.get('slots');
@@ -151,15 +63,6 @@ export function apply(ctx) {
     // Lazy namespace accessor: re-read every call (the namespace is mounted
     // by the contribution above; never capture it once at render time).
     const ns = () => scope.remote.btwPanel;
-
-    function formatStats(usage) {
-      const parts = [];
-      if (usage.input > 0) parts.push('in ' + usage.input);
-      if (usage.cacheRead > 0) parts.push('cache hit ' + usage.cacheRead);
-      if (usage.output > 0) parts.push('out ' + usage.output);
-      if (usage.cacheWrite > 0) parts.push('write ' + usage.cacheWrite);
-      return parts.join(' \u00b7 ');
-    }
 
     // Command card: a resumable side thread. Polls the btwPanel remote;
     // pauses once the outcome is terminal (a follow-up restarts it), stops on

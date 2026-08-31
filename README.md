@@ -193,9 +193,10 @@ cordis.patch.yml Profile layer patch    (dsh.bundle.patch target)
 ```
 
 ```bash
-pnpm install          # or: npm install (esbuild devDependency only)
+pnpm install          # or: npm install (esbuild + zod devDependencies)
 npm run build         # copies host + bundles client + verifies
 npm run verify        # checks the committed lib/ contract (bundle + smoke)
+npm test              # unit tests for the pure host/client helpers (node --test)
 npm run e2e           # boots a real Cordis ctx with the REAL timer/sessions/commands/
                       #   typert services, mounts lib/index.js, drives commands.execute
                       #   and the btwPanel remote, and asserts the full host contract
