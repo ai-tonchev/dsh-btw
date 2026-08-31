@@ -31,13 +31,55 @@ import { ZERO_USAGE, commandIdParam, textParam, statusSchema, okSchema, descript
 export const name = pkg.name;
 export const inject = ['slots', 'remote', 'timer'];
 
+/**
+ * Global "show thinking (CoT)" preference. A single module-level store shared by
+ * every BTW card, persisted to localStorage so the user's choice becomes the
+ * default for later sessions. `subscribe`/`get` mirror `useSyncExternalStore`'s
+ * contract so each card can subscribe with plain useState + useEffect.
+ */
+const THINKING_PREF_KEY = 'dsh-btw:show-thinking';
+const thinkingListeners = new Set();
+let showThinkingPref = readShowThinkingPref();
+
+function readShowThinkingPref() {
+  try {
+    if (typeof localStorage === 'undefined') return true;
+    const raw = localStorage.getItem(THINKING_PREF_KEY);
+    return raw === null ? true : raw !== 'false';
+  } catch (err) {
+    return true; // storage unavailable — keep the default
+  }
+}
+
+function setShowThinkingPref(value) {
+  showThinkingPref = value;
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(THINKING_PREF_KEY, value ? 'true' : 'false');
+  } catch (err) { /* non-fatal */ }
+  for (const listener of thinkingListeners) listener();
+}
+
+function subscribeShowThinking(listener) {
+  thinkingListeners.add(listener);
+  return () => thinkingListeners.delete(listener);
+}
+
+function getShowThinking() {
+  return showThinkingPref;
+}
+
 const PANEL_CSS = `
 [data-dsh-btw].btw-tool{height:28px;padding:0 10px;border:none;border-radius:999px;background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.15));color:var(--dsw-alias-label-secondary,#a0a4ad);font-size:12px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:4px}
 [data-dsh-btw].btw-tool:hover{color:var(--dsw-alias-label-primary,#e8eaee)}
 [data-dsh-btw].btw-card{display:flex;flex-direction:column;gap:6px;padding:10px 14px;border-radius:10px;background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12));max-width:min(680px,82%)}
 [data-dsh-btw] .btw-card-head{font-size:12px;font-weight:600;color:var(--dsw-alias-label-caption,#7c818c)}
+[data-dsh-btw] .btw-card-headrow{display:flex;align-items:center;justify-content:space-between;gap:8px}
+[data-dsh-btw] .btw-card-thinktoggle{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--dsw-alias-label-caption,#7c818c);cursor:pointer;user-select:none}
+[data-dsh-btw] .btw-card-thinktoggle input{margin:0;cursor:pointer;accent-color:var(--dsw-alias-state-business-primary,#2b6de8)}
 [data-dsh-btw] .btw-card-you{font-size:13px;color:var(--dsw-alias-label-secondary,#a0a4ad);word-break:break-word}
 [data-dsh-btw] .btw-card-a{font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,#e8eaee);white-space:pre-wrap;word-break:break-word}
+[data-dsh-btw] .btw-card-thinking{font-size:12px;line-height:18px;color:var(--dsw-alias-label-caption,#7c818c);border-left:2px solid var(--dsw-alias-border-l2,#383d48);padding-left:8px;margin:2px 0;white-space:pre-wrap;word-break:break-word}
+[data-dsh-btw] .btw-card-thinking-label{font-size:10px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--dsw-alias-label-caption,#7c818c)}
 [data-dsh-btw] .btw-card-run{font-size:12px;color:var(--dsw-alias-state-business-primary,#2b6de8)}
 [data-dsh-btw] .btw-card-err{font-size:12px;color:var(--dsw-alias-state-error-primary,#e5484d)}
 [data-dsh-btw] .btw-card-cx{font-size:12px;color:var(--dsw-alias-label-caption,#7c818c)}
@@ -102,8 +144,12 @@ export function apply(ctx) {
       const [state, setState] = React.useState(null);
       const [checked, setChecked] = React.useState(false);
       const [draft, setDraft] = React.useState('');
+      const [showThinking, setShowThinkingState] = React.useState(getShowThinking());
       const intervalRef = React.useRef(null);
       const pollRef = React.useRef(() => {});
+
+      // Re-render this card whenever the global thinking preference changes.
+      React.useEffect(() => subscribeShowThinking(() => setShowThinkingState(getShowThinking())), []);
 
       React.useEffect(() => {
         let disposed = false;
@@ -173,24 +219,41 @@ export function apply(ctx) {
       if (state === null) return null;
 
       const usage = state.usage || ZERO_USAGE;
-      const cells = [React.createElement('div', { className: 'btw-card-head', key: 'head' }, 'BTW')];
+      const thinkingBlock = (text, key) => React.createElement('div', { className: 'btw-card-thinking', key },
+        React.createElement('div', { className: 'btw-card-thinking-label' }, 'show thinking'),
+        text,
+      );
+      const thinkToggle = React.createElement('label', { className: 'btw-card-thinktoggle', key: 'think' },
+        React.createElement('input', {
+          type: 'checkbox',
+          checked: showThinking,
+          onChange: (e) => setShowThinkingPref(e.target.checked),
+        }),
+        'show thinking',
+      );
+      const cells = [React.createElement('div', { className: 'btw-card-headrow', key: 'head' },
+        React.createElement('div', { className: 'btw-card-head' }, 'BTW'),
+        thinkToggle,
+      )];
       (state.exchanges || []).forEach((exchange, i) => {
         if (exchange.role === 'user') {
           cells.push(React.createElement('div', { className: 'btw-card-you', key: 'u' + i }, 'You: ' + exchange.text));
+        } else if (exchange.role === 'reasoning') {
+          if (showThinking) cells.push(thinkingBlock(exchange.text, 't' + i));
         } else {
           cells.push(React.createElement('div', { className: 'btw-card-a', key: 'a' + i }, exchange.text));
         }
       });
       if (state.status === 'running') {
-        cells.push(React.createElement('div', { className: 'btw-card-run', key: 'r' }, 'answering\u2026'));
+        if (state.streamingReasoning && showThinking) cells.push(thinkingBlock(state.streamingReasoning, 'sr'));
+        if (state.streamingText) cells.push(React.createElement('div', { className: 'btw-card-a', key: 'st' }, state.streamingText));
+        cells.push(React.createElement('div', { className: 'btw-card-run', key: 'r' }, state.resident !== false ? 'answering\u2026' : 'side thread starting\u2026'));
         cells.push(React.createElement('button', { className: 'btw-card-cancel', key: 'c', onClick: cancelAsk }, 'cancel'));
       } else if (state.status === 'cancelled') {
         cells.push(React.createElement('div', { className: 'btw-card-cx', key: 'c' }, 'cancelled'));
       } else if (state.status === 'error') {
         cells.push(React.createElement('div', { className: 'btw-card-err', key: 'e' }, state.error || 'side ask failed'));
       } else {
-        const stats = formatStats(usage);
-        if (stats !== '') cells.push(React.createElement('div', { className: 'btw-card-stats', key: 's' }, stats));
         cells.push(React.createElement('div', { className: 'btw-card-inputrow', key: 'f' },
           React.createElement('input', {
             className: 'btw-card-input',
@@ -201,6 +264,8 @@ export function apply(ctx) {
           }),
           React.createElement('button', { className: 'btw-card-send', onClick: submitFollowup, disabled: draft.trim() === '' }, 'Ask'),
         ));
+        const stats = formatStats(usage);
+        if (stats !== '') cells.push(React.createElement('div', { className: 'btw-card-stats', key: 's' }, stats));
       }
       return React.createElement('div', { className: 'btw-card', 'data-dsh-btw': '' }, cells);
     }

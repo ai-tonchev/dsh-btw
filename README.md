@@ -17,9 +17,11 @@ agent keeps running**, without interrupting or polluting the main conversation.
   answering, and a **follow-up input** that continues the same child session.
 - The question is answered by a **durable, continuable fork subagent** — a
   separate child session seeded with the parent's completed-turn prefix
-  (provider prefix-cache friendly) and restricted to a **read-only toolset**, so
-  it can neither race the main task's file writes nor pollute the main
-  conversation's prompt surface.
+  (provider prefix-cache friendly) and granted **no tools by default**, so it
+  can neither race the main task's file writes nor pollute the main
+  conversation's prompt surface, and it carries no tool-schema token overhead.
+  (Tools can be re-enabled via the profile's `cordis.patch.yml` — see
+  [Re-enabling side-thread tools](#re-enabling-side-thread-tools).)
 
 Repository: <https://github.com/ai-tonchev/dsh-btw>
 
@@ -103,7 +105,7 @@ Host: commands.execute('/btw …')      ← command/run + command/done are
         ▼
 Host: subagents.startContinuable(      ← durable continuable child, seeded
         provider: 'fork',                with the parent's completed-turn
-        prompt: [preamble + question],   prefix; toolFilter = read-only set
+        prompt: [preamble + question],   prefix; toolFilter = [] (no tools)
       )
         │
         ▼
@@ -136,6 +138,32 @@ this is a deliberate trade-off (keeping the answer out of the main log
 preserves the byte-identical model surface), so **cards are live-only**: on
 replay from an earlier process they render nothing.
 
+## Re-enabling side-thread tools
+
+By default each BTW child runs with **no tools** — the closest match to Claude
+Code's `/btw`, where the side thread answers from the context it inherits and
+your question, without being able to read files or search. This also keeps the
+child's request lean: tool schemas are the dominant part of a subagent's
+uncached input tokens, and a tool-less child sends none.
+
+To let the side thread look things up, grant a subset of the read-only pool in
+the profile's patch layer, `~/.dsh/profiles/<profile>/cordis.patch.yml`:
+
+```yaml
+- id: dsh-btw
+  config:
+    tools:
+      - read
+      - web_search
+```
+
+`config.tools` is the list of tool names to grant, intersected with what the
+deployment actually registers. The read-only pool the plugin ships with is
+`read`, `glob`, `grep`, `web_search`, `read_image`, `skill` (see `SAFE_TOOLS` in
+`src/host-helpers.js`). Grant a read-only subset to keep the child from
+modifying the workspace. Then **restart the DSH web process** — the host half
+reads this config at boot.
+
 ## Prerequisites & supported platforms
 
 | Aspect | Requirement |
@@ -151,7 +179,7 @@ replay from an earlier process they render nothing.
 | Area | What the plugin does |
 | --- | --- |
 | Commands | Registers the `btw` command (log-only lifecycle; never enters the model surface) |
-| Subagents | Spawns **continuable fork** children per ask, seeded with the parent's completed-turn prefix and restricted via `toolFilter` to a read-only set (`read`, `glob`, `grep`, `web_search`, `read_image`, `skill` — intersected with tools actually registered) |
+| Subagents | Spawns **continuable fork** children per ask, seeded with the parent's completed-turn prefix. Tools default to **none** (no tool schemas, no token overhead); grant a subset of the read-only pool (`read`, `glob`, `grep`, `web_search`, `read_image`, `skill`) via `config.tools` in `cordis.patch.yml` to re-enable lookups |
 | Remote (web only) | `btwPanel` Typert namespace: `status` / `followup` / `cancel` |
 | Network | The plugin itself opens **no** connections; `web_search` inside the child is the agent's own configured capability |
 | Credentials | **None** read, stored, or transmitted |

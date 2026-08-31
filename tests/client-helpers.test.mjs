@@ -58,6 +58,8 @@ test('statusSchema validates the host status payload and null', () => {
     error: '',
   };
   assert.equal(statusSchema.safeParse(payload).success, true);
+  // New streaming/resident fields are optional (older hosts still validate).
+  assert.equal(statusSchema.safeParse({ ...payload, streamingText: 'ans', streamingReasoning: 'think', resident: true }).success, true);
   assert.equal(statusSchema.safeParse(null).success, true);
   assert.equal(statusSchema.safeParse({ status: 'done' }).success, false);
   assert.equal(statusSchema.safeParse({ ...payload, usage: { input: 1 } }).success, false);

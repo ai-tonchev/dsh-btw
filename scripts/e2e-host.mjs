@@ -42,6 +42,7 @@ await ctx.plugin(CommandRuntime);
 
 const calls = { starts: [], followups: [], interrupts: [] };
 let spawnCount = 0;
+let followupChild = null; // when set, child-stub-1 resolves to this cold-resumed session
 ctx.provide('subagents', {
   list: () => ['fork'],
   startContinuable: async (spec) => {
@@ -51,6 +52,7 @@ ctx.provide('subagents', {
   },
   followup: async (parent, childId, content, options) => {
     calls.followups.push({ parent, childId, content, options });
+    if (childId === 'child-stub-1') followupChild = fakeChildFollowup; // simulate cold resume into a NEW Session object
     return 'msg-stub-2';
   },
   interrupt: (targetSessionId, authority) => {
@@ -70,8 +72,44 @@ const fakeChild = {
     ],
   },
 };
+// A follow-up cold-resumes the child into a NEW Session object: same seed + first
+// turn (seqs 0..4), then a session/end-seed resume marker and the follow-up turn.
+const fakeChildFollowup = {
+  session: {
+    events: [
+      { type: 'turn/end', seq: 0, data: { turn: 0, reason: { kind: 'completed' } } },
+      { type: 'user/message', seq: 1, data: { content: [{ type: 'text', text: 'seed user msg' }] } },
+      { type: 'user/message', seq: 2, data: { content: [{ type: 'text', text: 'the btw question' }] } },
+      { type: 'assistant/message', seq: 3, data: { message: { content: [{ type: 'text', text: 'the side answer' }] }, usage: { inputTokens: 10, outputTokens: 20, cacheReadTokens: 30, cacheWriteTokens: 0 } } },
+      { type: 'turn/end', seq: 4, data: { turn: 1, reason: { kind: 'completed' } } },
+      { type: 'session/end-seed', seq: 5, data: {} },
+      { type: 'turn/start', seq: 6, data: { turn: 2 } },
+      { type: 'user/message', seq: 7, data: { content: [{ type: 'text', text: 'again' }] } },
+      { type: 'assistant/message', seq: 8, data: { message: { content: [{ type: 'text', text: 'follow-up answer' }] }, usage: { outputTokens: 5 } } },
+      { type: 'turn/end', seq: 9, data: { turn: 2, reason: { kind: 'completed' } } },
+    ],
+  },
+};
+// A child whose AGENT is disposed right after the fork resolves: the poll must
+// keep folding via the captured Session object (regression for the disposal race).
+const fakeChild3 = {
+  session: {
+    events: [
+      { type: 'turn/end', seq: 0, data: { turn: 0, reason: { kind: 'completed' } } },
+      { type: 'user/message', seq: 1, data: { content: [{ type: 'text', text: 'third ask' }] } },
+      { type: 'assistant/message', seq: 2, data: { message: { content: [{ type: 'text', text: 'answer after disposal' }] }, usage: { outputTokens: 7 } } },
+      { type: 'turn/end', seq: 3, data: { turn: 1, reason: { kind: 'completed' } } },
+    ],
+  },
+};
+let childResident = true;
 ctx.provide('agents', {
-  get: (id) => (id === 'child-stub-1' ? fakeChild : undefined),
+  get: (id) => {
+    if (!childResident) return undefined;
+    if (id === 'child-stub-1') return followupChild || fakeChild;
+    if (id === 'child-stub-3') return fakeChild3;
+    return undefined;
+  },
   list: () => [],
   roots: () => [],
 });
@@ -108,8 +146,8 @@ try {
   const promptText = String(spec.request.prompt[0].text || '');
   assert(promptText.includes('hello world'), 'prompt embeds the question');
   assert(promptText.includes('by the way'), 'prompt carries the framing');
-  assert(spec.request.toolFilter && Array.isArray(spec.request.toolFilter.allow), 'read-only toolFilter present');
-  assert(spec.request.toolFilter.allow.includes('read') && !spec.request.toolFilter.allow.includes('bash'), 'toolFilter allows read and excludes bash');
+  assert(spec.request.toolFilter && Array.isArray(spec.request.toolFilter.allow), 'toolFilter present');
+  assert(spec.request.toolFilter.allow.length === 0, 'toolFilter defaults to no tools (empty allow-list)');
 
   // 4. btwPanel Typert remote
   const panel = ctx.get('btwPanel');
@@ -130,11 +168,29 @@ try {
   assert(settled.exchanges.some((e) => e.role === 'assistant' && e.text === 'the side answer'), 'transcript contains the child answer');
   assert(settled.usage.cacheRead === 30, 'usage folded from the child log');
 
+  // 4b2. a follow-up cold-resumes the child into a NEW Session object; the poll
+  // must re-capture it and fold the follow-up turn (regression: follow-up dies).
+  const followupRes = await panel.followup(execution.commandId, 'again', new AbortController().signal);
+  assert(followupRes && followupRes.ok === true, 'follow-up accepted');
+  await sleep(1300);
+  const followed = await panel.status(execution.commandId);
+  assert(followed !== null && followed.status === 'done', `follow-up folds to done via re-captured session (got ${followed && followed.status})`);
+  assert(followed.exchanges.some((e) => e.role === 'assistant' && e.text === 'follow-up answer'), 'follow-up answer folded from the re-captured session');
+
   // 4c. a second ask whose child is not resident stays running
   const execution2 = await ctx.commands.execute(agent, '/btw second ask', [], new AbortController().signal);
   await sleep(1300);
   const running = await panel.status(execution2.commandId);
   assert(running !== null && running.status === 'running', 'unresolved child keeps the entry running');
+
+  // 4d. a child whose AGENT is disposed after capture still folds to done via the captured Session
+  const execution3 = await ctx.commands.execute(agent, '/btw third ask', [], new AbortController().signal);
+  await sleep(50); // let startContinuable resolve and capture the child Session
+  childResident = false; // simulate the continuation manager disposing the child agent
+  await sleep(1300);
+  const settled3 = await panel.status(execution3.commandId);
+  assert(settled3 !== null && settled3.status === 'done', `disposed child folds to done via captured session (got ${settled3 && settled3.status})`);
+  assert(settled3.exchanges.some((e) => e.role === 'assistant' && e.text === 'answer after disposal'), 'disposed child answer folded from the captured session');
 
   // 5. teardown interrupts the still-running side thread
   await btwFiber.dispose();

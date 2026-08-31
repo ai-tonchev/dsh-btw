@@ -68,28 +68,32 @@ test('foldUsage accumulates numeric fields and ignores garbage', () => {
   assert.deepEqual(entry.usage, { input: 11, output: 22, cacheRead: 33, cacheWrite: 44 });
 });
 
-test('computeToolFilter intersects with registered tools', () => {
+test('computeToolFilter defaults to no tools (empty allow-list)', () => {
   const tools = { schemas: () => [{ name: 'read' }, { name: 'grep' }, { name: 'bash' }] };
-  const filter = computeToolFilter(tools);
-  assert.ok(filter.allow.includes('read'));
-  assert.ok(!filter.allow.includes('bash'));
-  assert.ok(filter.allow.length < SAFE_TOOLS.length);
+  assert.deepEqual(computeToolFilter(tools).allow, []);
+  assert.deepEqual(computeToolFilter(undefined).allow, []);
 });
 
-test('computeToolFilter falls back to the full read-only set when schemas are empty or unavailable (the bundle profile-level ctx case)', () => {
+test('computeToolFilter intersects an explicit allow-list with registered tools', () => {
+  const tools = { schemas: () => [{ name: 'read' }, { name: 'grep' }, { name: 'bash' }] };
+  // unregistered name is dropped
+  assert.deepEqual(computeToolFilter(tools, ['read', 'web_search']).allow, ['read']);
+  // explicit names that ARE registered pass through verbatim
+  assert.deepEqual(computeToolFilter(tools, ['read', 'bash']).allow, ['read', 'bash']);
+});
+
+test('computeToolFilter passes the full allow-list through when schemas are unavailable (the bundle profile-level ctx case)', () => {
   // A profile-level context exposes no agent tool scope: schemas() returns [].
   const emptyTools = { schemas: () => [] };
-  const fromEmpty = computeToolFilter(emptyTools);
-  assert.deepEqual(fromEmpty.allow, SAFE_TOOLS.slice());
-  assert.ok(!fromEmpty.allow.includes('bash'));
+  assert.deepEqual(computeToolFilter(emptyTools, ['read', 'grep']).allow, ['read', 'grep']);
 
   // tools service absent entirely.
-  const absent = computeToolFilter(undefined);
-  assert.deepEqual(absent.allow, SAFE_TOOLS.slice());
+  const absent = computeToolFilter(undefined, ['read', 'grep']);
+  assert.deepEqual(absent.allow, ['read', 'grep']);
 
   // schemas() throws.
   const throwingTools = { schemas: () => { throw new Error('no scope'); } };
-  assert.deepEqual(computeToolFilter(throwingTools).allow, SAFE_TOOLS.slice());
+  assert.deepEqual(computeToolFilter(throwingTools, ['read']).allow, ['read']);
 });
 
 test('foldChildEvents reads event.data payloads and completes the turn', () => {
@@ -113,15 +117,16 @@ test('foldChildEvents reads event.data payloads and completes the turn', () => {
   assert.deepEqual(entry.usage, { input: 10, output: 20, cacheRead: 30, cacheWrite: 0 });
 });
 
-test('foldChildEvents stops on a seq/index mismatch (live-log guard)', () => {
+test('foldChildEvents resumes at the seq/index mismatch instead of skipping ahead', () => {
   const events = [
-    { type: 'turn/end', seq: 0, data: { reason: { kind: 'completed' } } },
-    { type: 'assistant/message', seq: 99, data: { message: { content: [{ type: 'text', text: 'x' }] } } }, // seq != index
+    { type: 'assistant/message', seq: 0, data: { message: { content: [{ type: 'text', text: 'first' }] } } },
+    { type: 'turn/end', seq: 99, data: { reason: { kind: 'completed' } } }, // seq != index
   ];
   const entry = { seedEndSeq: -1, lastSeenSeq: -1, pending: 1, status: 'running', error: '', exchanges: [], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
-  foldChildEvents(entry, events);
-  assert.equal(entry.status, 'running');
-  assert.equal(entry.pending, 1);
+  const next = foldChildEvents(entry, events);
+  assert.equal(next, 0); // stopped at the mismatch; must NOT claim events.length - 1
+  assert.equal(entry.status, 'running'); // the unreadable turn/end was not folded
+  assert.equal(entry.pending, 0); // the assistant message before it was folded
 });
 
 test('foldChildEvents marks a non-completed turn as error and an abort as cancelled', () => {
@@ -142,6 +147,71 @@ test('foldChildEvents marks a non-completed turn as error and an abort as cancel
   ];
   foldChildEvents(entryAbort, eventsAbort);
   assert.equal(entryAbort.status, 'cancelled');
+});
+
+test('foldChildEvents resolves a turn that ends with NO assistant/message (regression: stuck at answering)', () => {
+  // The agent loop emits turn/end for blocked / error / aborted-before-content /
+  // empty-first-step with ZERO assistant/message events. The transition must
+  // follow turn/end.reason, never an assistant-message count.
+  const makeEntry = () => ({ seedEndSeq: -1, lastSeenSeq: -1, pending: 1, status: 'running', error: '', exchanges: [], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
+
+  const errorEntry = makeEntry();
+  foldChildEvents(errorEntry, [
+    { type: 'turn/start', seq: 0, data: { turn: 1 } },
+    { type: 'turn/end', seq: 1, data: { turn: 1, reason: { kind: 'error' } } },
+  ]);
+  assert.equal(errorEntry.status, 'error');
+
+  const abortedEntry = makeEntry();
+  foldChildEvents(abortedEntry, [
+    { type: 'turn/start', seq: 0, data: { turn: 1 } },
+    { type: 'turn/end', seq: 1, data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'parent' } } } },
+  ]);
+  assert.equal(abortedEntry.status, 'cancelled');
+
+  const blockedEntry = makeEntry();
+  foldChildEvents(blockedEntry, [
+    { type: 'turn/start', seq: 0, data: { turn: 1 } },
+    { type: 'turn/end', seq: 1, data: { turn: 1, reason: { kind: 'blocked' } } },
+  ]);
+  assert.equal(blockedEntry.status, 'error');
+  assert.ok(blockedEntry.error.includes('blocked'));
+
+  const emptyEntry = makeEntry();
+  foldChildEvents(emptyEntry, [
+    { type: 'turn/start', seq: 0, data: { turn: 1 } },
+    { type: 'turn/end', seq: 1, data: { turn: 1, reason: { kind: 'completed' } } },
+  ]);
+  assert.equal(emptyEntry.status, 'done');
+});
+
+test('foldChildEvents streams assistant/chunk text and reasoning live, then finalizes', () => {
+  const entry = { seedEndSeq: -1, lastSeenSeq: -1, pending: 1, status: 'running', error: '', exchanges: [], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, streamingText: '', streamingReasoning: '' };
+  // Poll tick 1: partial stream — chunks accumulate, no terminal event yet.
+  entry.lastSeenSeq = foldChildEvents(entry, [
+    { type: 'assistant/chunk', seq: 0, data: { chunk: { type: 'reasoning-delta', index: 0, text: 'Let me ' } } },
+    { type: 'assistant/chunk', seq: 1, data: { chunk: { type: 'reasoning-delta', index: 0, text: 'think.' } } },
+    { type: 'assistant/chunk', seq: 2, data: { chunk: { type: 'text-delta', index: 1, text: 'Hello' } } },
+  ]);
+  assert.equal(entry.status, 'running');
+  assert.equal(entry.streamingReasoning, 'Let me think.');
+  assert.equal(entry.streamingText, 'Hello');
+  // Poll tick 2: stream completes, the assembled message finalizes, turn ends.
+  entry.lastSeenSeq = foldChildEvents(entry, [
+    { type: 'assistant/chunk', seq: 0, data: { chunk: { type: 'reasoning-delta', index: 0, text: 'Let me ' } } },
+    { type: 'assistant/chunk', seq: 1, data: { chunk: { type: 'reasoning-delta', index: 0, text: 'think.' } } },
+    { type: 'assistant/chunk', seq: 2, data: { chunk: { type: 'text-delta', index: 1, text: 'Hello' } } },
+    { type: 'assistant/chunk', seq: 3, data: { chunk: { type: 'text-delta', index: 1, text: ' world' } } },
+    { type: 'assistant/message', seq: 4, data: { message: { content: [{ type: 'reasoning', text: 'Let me think.' }, { type: 'text', text: 'Hello world' }] }, usage: { outputTokens: 5 } } },
+    { type: 'turn/end', seq: 5, data: { turn: 1, reason: { kind: 'completed' } } },
+  ]);
+  assert.equal(entry.status, 'done');
+  assert.equal(entry.streamingText, '');
+  assert.equal(entry.streamingReasoning, '');
+  assert.deepEqual(entry.exchanges, [
+    { role: 'reasoning', text: 'Let me think.' },
+    { role: 'assistant', text: 'Hello world' },
+  ]);
 });
 
 test('foldChildEvents ignores non-array input', () => {

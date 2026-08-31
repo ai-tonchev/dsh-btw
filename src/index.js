@@ -77,20 +77,36 @@ class BtwPanelService extends TypertRemoteService {
   }
 }
 
-export function apply(ctx) {
+export function apply(ctx, config) {
   const commands = ctx.commands;
   const subagents = ctx.subagents;
   const agents = ctx.agents;
   const jobs = ctx.get('jobs');
   const tools = ctx.get('tools');
+  // Tools granted to each side child. Empty by default (Claude /btw parity):
+  // configure via the profile's cordis.patch.yml, e.g. `config: { tools: [read, web_search] }`.
+  const allowedTools = config && Array.isArray(config.tools)
+    ? config.tools.filter((name) => typeof name === 'string')
+    : [];
 
   const runs = new Map();
 
   function pollChild(entry) {
     if (entry.childId === null) return;
+    // The child's Session OBJECT changes across activations: the continuation
+    // manager disposes the agent when its turn settles and cold-resumes a NEW
+    // agent + Session for a follow-up. Re-capture the live session whenever the
+    // agent is resident (so a follow-up folds the new activation's events), and
+    // fall back to the last captured session after disposal — its frozen snapshot
+    // still holds the final events of the just-finished turn.
+    let session = entry.childSession;
     const agent = agents.get(entry.childId);
-    if (!agent) return; // not resident (cold resume in progress) — retry next tick
-    const events = agent.session && Array.isArray(agent.session.events) ? agent.session.events : null;
+    if (agent && agent.session) {
+      session = agent.session;
+      entry.childSession = session;
+    }
+    if (!session) return; // not captured yet — retry next tick
+    const events = Array.isArray(session.events) ? session.events : null;
     if (!events) return;
     entry.lastSeenSeq = foldChildEvents(entry, events);
     maybeStopPoll(entry);
@@ -103,7 +119,7 @@ export function apply(ctx) {
 
   function maybeStopPoll(entry) {
     if (!entry.poll) return;
-    if ((entry.status === 'done' || entry.status === 'error' || entry.status === 'cancelled') && entry.pending <= 0) {
+    if (entry.status === 'done' || entry.status === 'error' || entry.status === 'cancelled') {
       try { entry.poll(); } catch (err) {}
       entry.poll = null;
     }
@@ -115,8 +131,11 @@ export function apply(ctx) {
       sessionId: agent.session.id,
       question,
       childId: null,
+      childSession: null,
       seedEndSeq: seedEndSeqOf(agent),
       exchanges: [{ role: 'user', text: question }],
+      streamingText: '',
+      streamingReasoning: '',
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       pending: 1,
       status: 'running',
@@ -128,12 +147,13 @@ export function apply(ctx) {
     };
     runs.set(commandId, entry);
     const preamble = buildPreamble(agent, jobs);
+    const toolFilter = computeToolFilter(tools, allowedTools);
+    const hasTools = !!(toolFilter && Array.isArray(toolFilter.allow) && toolFilter.allow.length > 0);
     const prompt =
       'Answer this side question ("by the way") directly and concisely, while the user\'s main task keeps running. ' +
-      'Use read or search tools only if needed; do not modify anything.' +
+      (hasTools ? 'Use read or search tools only if needed; do not modify anything.' : 'Do not modify anything.') +
       (preamble ? '\n\nCurrent context of the main conversation:\n' + preamble : '') +
       '\n\n' + question;
-    const toolFilter = computeToolFilter(tools);
     subagents.startContinuable({
       provider: 'fork',
       label: 'BTW: ' + excerpt(question, 48),
@@ -147,6 +167,11 @@ export function apply(ctx) {
       if (entry.status === 'cancelled') return;
       entry.childId = start.childId;
       entry.lastSeenSeq = entry.seedEndSeq;
+      // Capture the durable Session object NOW (the child agent is registered
+      // before startContinuable resolves): it outlives the agent, whose disposal
+      // on settlement is what used to starve the poll.
+      const child = agents.get(start.childId);
+      if (child && child.session) entry.childSession = child.session;
       ensurePoll(entry);
     }).catch((err) => {
       if (entry.status === 'cancelled') return;
@@ -176,6 +201,9 @@ export function apply(ctx) {
         status: entry.status,
         question: entry.question,
         exchanges: entry.exchanges.slice(-12),
+        streamingText: entry.streamingText,
+        streamingReasoning: entry.streamingReasoning,
+        resident: entry.childId !== null && (entry.childSession !== null || !!agents.get(entry.childId)),
         usage: {
           input: entry.usage.input,
           output: entry.usage.output,
@@ -202,6 +230,11 @@ export function apply(ctx) {
         entry.pending += 1;
         entry.error = '';
         if (entry.status === 'done' || entry.status === 'error') entry.status = 'running';
+        // The follow-up may have cold-resumed the child into a NEW Session object;
+        // re-capture it before the turn starts so a fast turn that completes and
+        // disposes within the poll interval still folds its events.
+        const child = agents.get(entry.childId);
+        if (child && child.session) entry.childSession = child.session;
         ensurePoll(entry);
         return { ok: true };
       }).catch((err) => ({ ok: false, error: err instanceof Error ? err.message : String(err) }));

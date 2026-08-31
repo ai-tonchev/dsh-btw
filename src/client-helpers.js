@@ -27,6 +27,10 @@ export const statusSchema = z.object({
   status: z.string(),
   question: z.string(),
   exchanges: z.array(z.object({ role: z.string(), text: z.string() })),
+  // Optional so an older host (without streaming) still validates; the card falls back to ''.
+  streamingText: z.string().optional(),
+  streamingReasoning: z.string().optional(),
+  resident: z.boolean().optional(),
   usage: z.object({ input: z.number(), output: z.number(), cacheRead: z.number(), cacheWrite: z.number() }),
   error: z.string(),
 }).nullable();
